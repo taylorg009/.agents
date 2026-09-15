@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+### Added
+
+- Read-only monitor metrics dashboard: render repository-level review completion,
+  observed sweep health and reported healing outcomes from a local ledger, with
+  explicit stale-data and refresh-failure reporting. Scheduling remains opt-in.
+
 ### Changed
 
 - **`clis/`, `skills/browser/`** — align browser guidance with the standalone

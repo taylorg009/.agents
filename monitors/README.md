@@ -22,6 +22,30 @@ built-in, so you can customize one per box without editing this repo.
 
 ## Using them
 
+### Evaluate a metrics ledger
+
+[`metrics-dashboard.py`](./metrics-dashboard.py) renders a read-only evaluation
+dashboard from a JSONL event ledger and a repository manifest. It requires Python
+3 and the installed `artifacts` command. It never calls GitHub or starts a server.
+
+```sh
+python3 metrics-dashboard.py --ledger /path/to/metrics.jsonl \
+  --manifest /path/to/repos.conf --output /path/to/dashboard \
+  --title "Monitor evaluation"
+```
+
+The dashboard separates observed sweep health, posted comments, full review
+completion and reported healing outcomes. It shows 24-hour and seven-day windows;
+it does not infer uptime, finding accuracy or verified fixes from these events.
+The manifest uses tab-separated repository, integration branch and required-check
+columns. Keep operational inputs and generated evidence outside this repository.
+
+Schedule the command through a user-level routine for periodic regeneration. It
+is not scheduled by installation. A failed refresh retains the last successful
+evidence timestamp and reports the failure instead of presenting old data as new.
+
+### Event-triggered monitors
+
 ```bash
 agents monitors list                       # see every monitor + its enable state
 agents monitors enable pr-merge-on-green    # turn the built-in on (this box)
