@@ -40,6 +40,24 @@ it does not infer uptime, finding accuracy or verified fixes from these events.
 The manifest uses tab-separated repository, integration branch and required-check
 columns. Keep operational inputs and generated evidence outside this repository.
 
+Review events may include a complete optional detail envelope: `attempt_id`,
+`head_sha` (40 hexadecimal characters), timezone-qualified `started_at` and
+`finished_at`, and exactly two `contributors`. Each contributor supplies
+`harness`, `family`, nullable `requested_model` and `actual_model`, integer
+`exit_code`, timezone-qualified `started_at` and `finished_at`, nonnegative
+`duration_s`, boolean `summary_present` and `completed`, nullable `failure_reason`,
+and a 64-character hexadecimal `prompt_sha256`. Completion requires a zero exit,
+a summary and no failure reason; incomplete contributors require a reason. The
+completed count must match `reviewers_ok`. Contributor times must fit the attempt,
+which must finish by the event timestamp; duration must match within one second.
+Malformed or partial detail envelopes fail the refresh. Legacy events remain valid:
+their detail fields are null in evidence and explicitly unknown on the page.
+
+Recent cases and source events retain these details in `evidence.json`. The page
+shows the recorded head SHA, attempt, reviewer outcomes and durations. Requested
+models never substitute for unknown actual models. These records do not measure
+cost or review quality.
+
 Schedule the command through a user-level routine for periodic regeneration. It
 is not scheduled by installation. A failed refresh retains the last successful
 evidence timestamp and reports the failure instead of presenting old data as new.

@@ -4,6 +4,9 @@
 
 ### Added
 
+- Optional per-reviewer monitor telemetry: validated attempt/head identity, timing,
+  execution outcomes and model evidence, with legacy details explicitly unknown.
+
 - Read-only monitor metrics dashboard: render repository-level review completion,
   observed sweep health and reported healing outcomes from a local ledger, with
   explicit stale-data and refresh-failure reporting. Scheduling remains opt-in.

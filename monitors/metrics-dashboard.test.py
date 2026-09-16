@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Real-file boundary and publication checks; requires installed artifacts."""
 import argparse
+import copy
 import importlib.util
 import json
 from pathlib import Path
@@ -34,6 +35,75 @@ class DashboardTests(unittest.TestCase):
     def summarize(self):
         repos, rows, source = dashboard.read_inputs(self.ledger, self.manifest, self.as_of)
         return dashboard.summarize(repos, rows, self.as_of, source)
+
+    def detailed_review(self):
+        contributor = dict(harness='sample-cli', family='sample-family',
+            requested_model='requested-example', actual_model=None, exit_code=0,
+            started_at='2026-01-06T23:59:00Z', finished_at='2026-01-07T00:00:00Z',
+            duration_s=60, summary_present=True, completed=True, failure_reason=None,
+            prompt_sha256='b' * 64)
+        return self.event('review', post_rc=0, reviewers_ok=2, degraded=False,
+            attempt_id='sample-attempt', head_sha='a' * 40,
+            started_at=contributor['started_at'], finished_at=contributor['finished_at'],
+            contributors=[contributor, copy.deepcopy(contributor)])
+
+    def test_review_details_and_legacy_survive_publication(self):
+        detailed = self.detailed_review()
+        detailed['contributors'][1].update(completed=False, failure_reason='model_resolution')
+        detailed.update(reviewers_ok=1, degraded=True)
+        legacy = self.event('review', post_rc=0, reviewers_ok=2, degraded=False)
+        self.write([detailed, legacy])
+        data = self.summarize()
+        self.assertEqual(data['recent_cases'][0]['contributors'], detailed['contributors'])
+        self.assertEqual(data['recent_cases'][0]['head_sha'], 'a' * 40)
+        for field in dashboard.REVIEW_DETAILS:
+            self.assertIsNone(data['recent_cases'][1][field])
+        args = argparse.Namespace(ledger=self.ledger, manifest=self.manifest, output=self.root / 'output', title='Sample evaluation', as_of=dashboard.iso(self.as_of))
+        self.assertEqual(dashboard.publish(args), 0)
+        snapshot = args.output / json.loads((args.output / 'current.json').read_text())['snapshot']
+        evidence = json.loads((snapshot / 'evidence.json').read_text())
+        self.assertEqual(evidence['events'][0]['contributors'], detailed['contributors'])
+        page = (args.output / 'dashboard.html').read_text()
+        for phrase in ['a' * 40, 'actual model: unknown', 'Duration: 60 seconds', 'model_resolution', 'Legacy event: head SHA', 'Cost is unmeasured']:
+            self.assertIn(phrase, page)
+
+    def test_malformed_review_details_fail_closed(self):
+        mutations = [
+            lambda r: r.pop('head_sha'),
+            lambda r: r.update(head_sha='abc'),
+            lambda r: r.update(attempt_id=''),
+            lambda r: r.update(contributors=[]),
+            lambda r: r.update(contributors=[None, None]),
+            lambda r: r.update(finished_at='2026-01-07T00:00:01Z'),
+            lambda r: r['contributors'][0].update(exit_code=True),
+            lambda r: r['contributors'][0].update(actual_model=123),
+            lambda r: r['contributors'][0].pop('requested_model'),
+            lambda r: r['contributors'][0].update(prompt_sha256='x' * 64),
+            lambda r: r['contributors'][0].update(duration_s=float('nan')),
+            lambda r: r['contributors'][0].update(duration_s=10),
+            lambda r: r['contributors'][0].update(started_at='2026-01-06T23:58:00Z'),
+            lambda r: r['contributors'][0].update(finished_at='2026-01-06T23:59:00'),
+            lambda r: r['contributors'][0].update(summary_present=False),
+            lambda r: r['contributors'][0].update(completed='true'),
+            lambda r: r['contributors'][0].update(failure_reason='model_resolution'),
+            lambda r: r['contributors'][0].update(completed=False),
+            lambda r: r['contributors'][0].update(completed=False, failure_reason='model_resolution'),
+        ]
+        for index, mutate in enumerate(mutations):
+            with self.subTest(index=index):
+                row = self.detailed_review()
+                mutate(row)
+                self.write([row])
+                with self.assertRaisesRegex(ValueError, 'ledger line 1:'):
+                    self.summarize()
+
+    def test_reviewer_text_cannot_inject_html(self):
+        row = self.detailed_review()
+        row['contributors'][0]['actual_model'] = '<script>alert(1)</script>'
+        self.write([row])
+        source = dashboard.markdown(self.summarize(), 'Sample')
+        self.assertNotIn('<script>', source)
+        self.assertIn('&lt;script&gt;', source)
 
     def test_boundaries_dry_runs_scope_and_observed_gaps(self):
         self.write([
