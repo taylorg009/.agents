@@ -34,6 +34,57 @@ def number(row, key, default=None):
     return value
 
 
+REVIEW_DETAILS = ('attempt_id', 'head_sha', 'started_at', 'finished_at', 'contributors')
+
+
+def review_details(row, event_time):
+    if not any(key in row for key in REVIEW_DETAILS):
+        row.update(dict.fromkeys(REVIEW_DETAILS))
+        return
+    if not all(key in row for key in REVIEW_DETAILS):
+        raise ValueError('review details must include ' + ', '.join(REVIEW_DETAILS))
+    if not isinstance(row['attempt_id'], str) or not row['attempt_id'].strip():
+        raise ValueError('invalid review attempt_id')
+    if not isinstance(row['head_sha'], str) or not re.fullmatch(r'[0-9a-fA-F]{40}', row['head_sha']):
+        raise ValueError('invalid review head_sha')
+    start, finish = timestamp(row['started_at']), timestamp(row['finished_at'])
+    if not start <= finish <= event_time:
+        raise ValueError('review timestamps out of order')
+    contributors = row['contributors']
+    if not isinstance(contributors, list) or len(contributors) != 2:
+        raise ValueError('review must have exactly two contributors')
+    for contributor in contributors:
+        if not isinstance(contributor, dict):
+            raise ValueError('review contributor must be an object')
+        for key in ('harness', 'family'):
+            if not isinstance(contributor.get(key), str) or not contributor[key].strip():
+                raise ValueError('invalid contributor ' + key)
+        for key in ('requested_model', 'actual_model', 'failure_reason'):
+            value = contributor[key]
+            if value is not None and (not isinstance(value, str) or not value.strip()):
+                raise ValueError('invalid contributor ' + key)
+        if type(contributor.get('exit_code')) is not int:
+            raise ValueError('invalid contributor exit_code')
+        for key in ('summary_present', 'completed'):
+            if type(contributor.get(key)) is not bool:
+                raise ValueError('invalid contributor ' + key)
+        if contributor['completed'] and (contributor['exit_code'] != 0 or not contributor['summary_present'] or contributor['failure_reason'] is not None):
+            raise ValueError('completed contributor has failure evidence')
+        if not contributor['completed'] and contributor['failure_reason'] is None:
+            raise ValueError('incomplete contributor needs failure_reason')
+        contributor_start = timestamp(contributor['started_at'])
+        contributor_finish = timestamp(contributor['finished_at'])
+        if not start <= contributor_start <= contributor_finish <= finish:
+            raise ValueError('contributor timestamps outside review interval')
+        elapsed = number(contributor, 'duration_s')
+        if abs(elapsed - (contributor_finish - contributor_start).total_seconds()) > 1:
+            raise ValueError('contributor duration inconsistent with timestamps')
+        if not isinstance(contributor.get('prompt_sha256'), str) or not re.fullmatch(r'[0-9a-fA-F]{64}', contributor['prompt_sha256']):
+            raise ValueError('invalid contributor prompt_sha256')
+    if sum(c['completed'] for c in contributors) != row['reviewers_ok']:
+        raise ValueError('contributor completion inconsistent with reviewers_ok')
+
+
 def read_inputs(ledger, manifest, as_of):
     manifest_bytes = manifest.read_bytes()
     repos = []
@@ -92,6 +143,7 @@ def read_inputs(ledger, manifest, as_of):
                     raise ValueError('review degraded must be boolean')
                 if row['degraded'] != (row['reviewers_ok'] != 2):
                     raise ValueError('review degraded inconsistent with successful reviewers')
+                review_details(row, time)
             elif kind == 'heal':
                 if row.get('outcome') not in ('PUSHED', 'DIAGNOSED', 'INFRA_FAIL', 'ABSTAINED', 'UNKNOWN', 'TIMEOUT', 'SCOPE_VIOLATION', 'RENDER_FAIL', 'SKIPPED'):
                     raise ValueError('unsupported heal outcome')
@@ -113,7 +165,7 @@ def summarize(repos, rows, as_of, source):
     last = max((r['time'] for r in rows), default=None)
     age = (as_of - last).total_seconds() if last else None
     result = {'as_of': iso(as_of), 'last_event_at': iso(last) if last else None, 'last_event_age_seconds': age,
-              'recent_cases': [{k: r[k] for k in ('ts', 'type', 'repo', 'pr', 'post_rc', 'degraded', 'reviewers_ok', 'outcome') if k in r} for r in sorted(rows, key=lambda r: r['time'], reverse=True) if r['type'] in ('review', 'heal')][:20],
+              'recent_cases': [{k: r[k] for k in ('ts', 'type', 'repo', 'pr', 'post_rc', 'degraded', 'reviewers_ok', 'outcome') + REVIEW_DETAILS if k in r} for r in sorted(rows, key=lambda r: r['time'], reverse=True) if r['type'] in ('review', 'heal')][:20],
               'freshness': 'no events' if age is None else 'stale' if age > 1800 else 'recent', 'source': source, 'windows': {}}
     for name, days in [('24h', 1), ('7d', 7)]:
         start = as_of - timedelta(days=days)
@@ -186,7 +238,23 @@ def markdown(data, title):
         if case['type'] == 'review':
             outcome = 'post failed' if case['post_rc'] else 'degraded post' if case['degraded'] or case['reviewers_ok'] < 2 else 'full post'
         text.append(f"| {human_time(case['ts'])} | [{case['repo']}#{case['pr']}](https://github.com/{case['repo']}/pull/{case['pr']}) | {case['type']} | {outcome} |")
-    text.append('')
+    text.extend(['', '### Reviewer details', '',
+        'Recorded completion describes execution, not review quality. Requested models are configuration; actual models remain unknown unless recorded. Cost is unmeasured.', ''])
+    for case in data['recent_cases']:
+        if case['type'] != 'review':
+            continue
+        text.extend([f"#### {case['repo']}#{case['pr']} · {human_time(case['ts'])}", ''])
+        if case.get('contributors') is None:
+            text.extend(['Legacy event: head SHA, attempt, reviewer outcomes, durations and actual models are **unknown**.', ''])
+            continue
+        text.extend([f"Head SHA: <code>{html.escape(case['head_sha'])}</code><br>Attempt: {html.escape(case['attempt_id'])}<br>Started: {human_time(case['started_at'])}; finished: {human_time(case['finished_at'])}.", ''])
+        for contributor in case['contributors']:
+            state = 'completed' if contributor['completed'] else 'incomplete'
+            text.extend(['<article class="artifact-callout">',
+                f"<strong>{html.escape(contributor['harness'])} / {html.escape(contributor['family'])}: {state}</strong><br>",
+                f"Duration: {contributor['duration_s']:g} seconds; exit code: {contributor['exit_code']}; summary present: {'yes' if contributor['summary_present'] else 'no'}.<br>",
+                f"Requested model: {html.escape(contributor['requested_model'] or 'unknown')}; actual model: {html.escape(contributor['actual_model'] or 'unknown')}.<br>",
+                f"Failure reason: {html.escape(contributor['failure_reason'] or 'none recorded')}.", '</article>', ''])
     text.extend(['Full posts require exactly two successful reviewers and no degraded flag. Counts describe events, not unique pull requests. Zero means no matching records in the supplied ledger, not proof of no activity.', '', '### Evidence', '',
         f"Ledger SHA-256: `{data['source']['ledger_sha256']}`", '', f"Manifest SHA-256: `{data['source']['manifest_sha256']}`", '',
         f"Dry-run events excluded: {data['source']['dry_run_events_excluded']}. Snapshot evidence: [JSON](evidence.json).", ''])
@@ -226,7 +294,7 @@ def publish(args):
         repos, rows, source = read_inputs(args.ledger, args.manifest, as_of)
         data = summarize(repos, rows, as_of, source)
         run.mkdir(parents=True)
-        data['events'] = [{k: (iso(v) if isinstance(v, datetime) else v) for k, v in row.items() if k in ('ts', 'type', 'repo', 'repository', 'pr', 'post_rc', 'reviewers_ok', 'degraded', 'outcome', 'duration_s', 'result', 'err_repos', 'line')} for row in rows]
+        data['events'] = [{k: (iso(v) if isinstance(v, datetime) else v) for k, v in row.items() if k in ('ts', 'type', 'repo', 'repository', 'pr', 'post_rc', 'reviewers_ok', 'degraded', 'outcome', 'duration_s', 'result', 'err_repos', 'line') + REVIEW_DETAILS} for row in rows]
         (run / 'evidence.json').write_text(json.dumps(data, indent=2) + '\n')
         # The stable page points directly at this immutable evidence, never another run.
         source_md = markdown(data, args.title).replace('(evidence.json)', '(' + (run / 'evidence.json').as_uri() + ')')
